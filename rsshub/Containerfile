@@ -1,0 +1,45 @@
+# RSSHub 精简镜像（node:24-trixie-slim + 上游应用，无浏览器）
+# 构建：./build.sh [UPSTREAM_TAG]
+# 说明：不含 Chromium/Playwright 浏览器，依赖浏览器渲染的路由不可用
+# 精简方案、适配方法与实测数据见 总结.md
+
+ARG UPSTREAM_TAG=latest
+ARG NODE_VERSION=24.21.0
+
+FROM docker.io/diygod/rsshub:${UPSTREAM_TAG} AS app-source
+
+FROM docker.io/library/node:24-trixie-slim
+ARG NODE_VERSION
+ENV TZ=Asia/Shanghai \
+    NODE_ENV=production \
+    NODE_OPTIONS=--max-http-header-size=32768 \
+    DEBIAN_FRONTEND=noninteractive
+RUN set -eu; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        dumb-init libjemalloc2; \
+    rm -rf /var/lib/apt/lists/*
+# LD_PRELOAD 必须放在上面的 RUN 之后，否则构建时每条命令都会报
+# cannot be preloaded（此刻 libjemalloc.so.2 还没装上）
+ENV LD_PRELOAD=libjemalloc.so.2
+RUN --mount=from=app-source,source=/app,target=/src \
+    mkdir -p /app \
+    && cp -a /src/dist /src/node_modules /src/public /src/package.json /app/ \
+    && rm -rf /app/node_modules/.cache \
+              /app/node_modules/.pnpm/@typescript+typescript6@* \
+              /app/node_modules/typescript \
+              /app/node_modules/.pnpm/@oxc-parser+binding-wasm32-wasip1@* \
+              /app/node_modules/@oxc-parser/binding-wasm32-wasip1
+LABEL org.opencontainers.image.title="rsshub" \
+      org.opencontainers.image.version="${NODE_VERSION}" \
+      org.opencontainers.image.source="https://github.com/DIYgod/RSSHub"
+RUN set -eu; \
+    node --version >/dev/null; \
+    test -f /app/dist/index.mjs; \
+    test -d /app/node_modules
+WORKDIR /app
+EXPOSE 1200
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+ENTRYPOINT ["dumb-init", "--", "/entrypoint.sh"]
+CMD ["node", "dist/index.mjs"]

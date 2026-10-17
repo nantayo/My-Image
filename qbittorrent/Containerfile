@@ -1,0 +1,28 @@
+# qBittorrent Enhanced Edition 镜像（静态 musl 二进制 + alpine）
+# 构建：./build.sh [版本] [ALPINE_VERSION]
+# 精简方案、适配方法与实测数据见 总结.md
+ARG ALPINE_VERSION=3.24
+ARG QBT_VERSION=
+
+FROM docker.io/library/alpine:${ALPINE_VERSION} AS builder
+ARG QBT_VERSION
+WORKDIR /qbittorrent
+RUN set -e; \
+    apk add --no-cache curl unzip; \
+    curl -fsSL -o qbt.zip \
+      "https://github.com/c0re100/qBittorrent-Enhanced-Edition/releases/download/release-${QBT_VERSION}/qbittorrent-enhanced-nox_x86_64-linux-musl_static.zip"; \
+    unzip -q qbt.zip
+
+FROM docker.io/library/alpine:${ALPINE_VERSION}
+ARG QBT_VERSION
+ENV WEBUIPORT=8080
+RUN apk add --no-cache ca-certificates-bundle tzdata
+LABEL org.opencontainers.image.title="qbittorrentee" \
+      org.opencontainers.image.version="${QBT_VERSION}" \
+      org.opencontainers.image.source="https://github.com/c0re100/qBittorrent-Enhanced-Edition"
+COPY --from=builder /qbittorrent/qbittorrent-nox /usr/local/bin/qbittorrent-nox
+COPY defaults/qBittorrent.conf /usr/local/qbittorrent/defaults/qBittorrent.conf
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh /usr/local/bin/qbittorrent-nox
+EXPOSE 8080 6881 6881/udp
+ENTRYPOINT ["/entrypoint.sh"]

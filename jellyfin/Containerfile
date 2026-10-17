@@ -1,0 +1,70 @@
+# Jellyfin 精简镜像（debian:trixie-slim + 上游程序，无 Intel OpenCL/IGC 栈）
+# 构建：./build.sh [UPSTREAM_TAG]
+# 说明：apt 清单、入口点与上游一致；仅 locale 改为中文（时区仍由 podman run --tz=local 决定）；
+#       剔除实测无消费者的 OpenCL/IGC 栈与用不到的 CJK 字体。
+#       QSV 编解码与 VPP 色调映射不受影响。
+#       需要额外字体时用 --build-arg EXTRA_FONTS="fonts-wqy-microhei"
+#
+# 精简方案、适配方法与实测数据见 总结.md
+
+ARG UPSTREAM_TAG=latest
+ARG UPSTREAM_VERSION=
+ARG EXTRA_FONTS=
+
+FROM docker.io/nyanmisaka/jellyfin:${UPSTREAM_TAG} AS upstream
+
+FROM docker.io/library/debian:trixie-slim
+ARG UPSTREAM_VERSION
+ARG EXTRA_FONTS
+ENV DEBIAN_FRONTEND=noninteractive \
+    JELLYFIN_DATA_DIR=/config \
+    JELLYFIN_CACHE_DIR=/cache \
+    JELLYFIN_CONFIG_DIR=/config/config \
+    JELLYFIN_LOG_DIR=/config/log \
+    JELLYFIN_WEB_DIR=/jellyfin/jellyfin-web \
+    JELLYFIN_FFMPEG=/usr/lib/jellyfin-ffmpeg/ffmpeg \
+    XDG_CACHE_HOME=/cache \
+    MALLOC_TRIM_THRESHOLD_=131072 \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
+RUN set -eu; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates curl; \
+    mkdir -p /etc/apt/keyrings; \
+    curl -fsSL https://repo.jellyfin.org/jellyfin_team.gpg.key -o /etc/apt/keyrings/jellyfin.asc; \
+    echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/jellyfin.asc] https://repo.jellyfin.org/master/debian trixie main" \
+      > /etc/apt/sources.list.d/jellyfin.list; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      jellyfin-ffmpeg8 iproute2 openssl locales libicu76 \
+      libfontconfig1 libfreetype6 libjemalloc2 libdrm2 fonts-noto-cjk ${EXTRA_FONTS}; \
+    printf '%s\n' 'zh_CN.UTF-8 UTF-8' > /etc/locale.gen; \
+    locale-gen; \
+    apt-get clean; apt-get autoclean -y; apt-get autoremove -y; \
+    rm -rf /var/lib/apt/lists/* /var/cache/apt/*; \
+    mkdir -p /usr/lib/jellyfin /config /cache; \
+    chmod 777 /config /cache; \
+    ln -sf /usr/lib/x86_64-linux-gnu/libjemalloc.so.2 /usr/lib/jellyfin/libjemalloc.so.2
+# locale 与 LD_PRELOAD 必须放在上面的 RUN 之后，否则 ld.so/perl 会找不到尚未生成的目标
+ENV LANG=zh_CN.UTF-8 \
+    LANGUAGE=zh_CN:zh \
+    LC_ALL=zh_CN.UTF-8 \
+    LD_PRELOAD=/usr/lib/jellyfin/libjemalloc.so.2
+COPY --from=upstream /jellyfin /jellyfin
+LABEL org.opencontainers.image.title="jellyfin" \
+      org.opencontainers.image.version="${UPSTREAM_VERSION}" \
+      org.opencontainers.image.source="https://github.com/jellyfin/jellyfin-packaging"
+RUN set -eu; \
+    test -x /jellyfin/jellyfin; \
+    test -d /jellyfin/jellyfin-web; \
+    test -x /usr/lib/jellyfin-ffmpeg/ffmpeg; \
+    test -f /usr/lib/jellyfin-ffmpeg/lib/dri/iHD_drv_video.so; \
+    timeout 60 /jellyfin/jellyfin --version 2>&1 | grep -qE 'Jellyfin\.Server [0-9]+\.[0-9]+'; \
+    /usr/lib/jellyfin-ffmpeg/ffmpeg -hide_banner -filters 2>/dev/null | grep -qw tonemap_vaapi; \
+    /usr/lib/jellyfin-ffmpeg/ffmpeg -hide_banner -hwaccels 2>/dev/null | grep -qw qsv; \
+    locale -a | grep -qx zh_CN.utf8
+EXPOSE 8096
+VOLUME /config /cache
+# 注：未设 HEALTHCHECK —— podman 默认 OCI 格式不支持该字段，会被静默丢弃。
+# 需要健康检查就在 build.sh 里加 --format docker。
+ENTRYPOINT ["/jellyfin/jellyfin"]

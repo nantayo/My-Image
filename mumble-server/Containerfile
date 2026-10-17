@@ -1,0 +1,39 @@
+# mumble-server 镜像（源码构建，alpine）
+# 构建：./build.sh [版本] [ALPINE_VERSION]   （会先下载 mumble-<版本>.tar.gz 到本目录）
+# 精简方案、适配方法与实测数据见 总结.md
+ARG ALPINE_VERSION=3.24
+ARG MUMBLE_VERSION=
+
+FROM docker.io/library/alpine:${ALPINE_VERSION} AS builder
+ARG MUMBLE_VERSION
+RUN apk add --no-cache build-base boost-dev cmake samurai pkgconf linux-headers python3 qt5-qtbase-dev protobuf-dev libcap-dev openssl-dev
+WORKDIR /src
+COPY mumble-${MUMBLE_VERSION}.tar.gz .
+RUN tar -xzf "mumble-${MUMBLE_VERSION}.tar.gz" && mv "mumble-${MUMBLE_VERSION}" mumble-src
+WORKDIR /src/mumble-src
+RUN cmake -B build -G Ninja \
+      -DCMAKE_BUILD_TYPE=MinSizeRel -DBUILD_NUMBER="${MUMBLE_VERSION##*.}" \
+      -Dserver=ON -Dclient=OFF -Dplugins=OFF -Dice=OFF -Dzeroconf=OFF -Dpackaging=OFF \
+      -Dtests=OFF -Dsymbols=OFF -Dtranslations=OFF -Dbundle-qt-translations=OFF \
+      -Duse-timestamps=OFF -Dwarnings-as-errors=OFF -Dlto=ON \
+      -Denable-mysql=OFF -Denable-postgresql=OFF -Denable-sqlite=ON \
+    && cmake --build build && strip build/mumble-server
+
+FROM docker.io/library/alpine:${ALPINE_VERSION}
+ARG MUMBLE_VERSION
+RUN apk add --no-cache qt5-qtbase qt5-qtbase-sqlite libprotobuf libcrypto3 libssl3 libcap \
+ && mkdir -p /data \
+ && rm -rf /usr/share/icu/* /usr/lib/metatypes /usr/lib/girepository-1.0   # ICU 剔除有功能风险，见 总结.md
+LABEL org.opencontainers.image.title="mumble-server" \
+      org.opencontainers.image.version="${MUMBLE_VERSION}" \
+      org.opencontainers.image.source="https://github.com/mumble-voip/mumble"
+COPY --from=builder /src/mumble-src/auxiliary_files/mumble-server.ini /etc/mumble/mumble-server.ini
+COPY --from=builder /src/mumble-src/build/mumble-server /usr/bin/mumble-server
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+RUN set -e; \
+    for lib in $(ldd /usr/bin/mumble-server 2>&1 | awk '/Error loading shared library/{sub(/:$/,"",$5); print $5}'); do \
+      apk add --no-cache "so:$lib" >/dev/null; done
+VOLUME /data
+EXPOSE 64738/tcp 64738/udp
+ENTRYPOINT ["/entrypoint.sh"]
