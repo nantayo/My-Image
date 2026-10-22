@@ -1,0 +1,58 @@
+name: Build All Images
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 20 * * *"
+
+concurrency:
+  group: build-all-images
+
+env:
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  check:
+    name: 检测更新
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.check.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@main
+
+      - name: 检测镜像更新情况
+        id: check
+        run: sh .github/check.sh >> "$GITHUB_OUTPUT"
+
+      - name: 删除旧运行记录
+        run: |
+          gh run list -R "$GITHUB_REPOSITORY" -w build-all.yml --limit 100 --status completed --json databaseId --jq '.[3:][].databaseId' | while read -r id; do
+            gh run delete -R "$GITHUB_REPOSITORY" "$id" --yes
+            echo "已删除 run $id"
+          done
+
+  build:
+    name: 构建 ${{ matrix.image }}
+    needs: check
+    if: ${{ needs.check.outputs.matrix != '[]' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.check.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@main
+
+      - name: 构建 ${{ matrix.image }} 镜像
+        run: sh ${{ matrix.image }}/build.sh "${{ matrix.upstream }}"
+
+      - name: 推送 GHCR
+        run: |
+          echo "$GITHUB_TOKEN" | podman login ghcr.io -u "$GITHUB_ACTOR" --password-stdin >/dev/null
+          REPO="ghcr.io/nantayo/${{ matrix.image }}"
+          VERSION="${{ matrix.version }}"
+          podman push "localhost/${{ matrix.image }}:$VERSION" "$REPO:$VERSION" >/dev/null
+          podman manifest create tmp-ml "docker://$REPO:$VERSION" >/dev/null
+          podman manifest push tmp-ml "docker://$REPO:$VERSION" >/dev/null
+          podman manifest push tmp-ml "docker://$REPO:latest" >/dev/null
+          podman manifest rm tmp-ml >/dev/null
