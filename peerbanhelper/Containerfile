@@ -1,0 +1,33 @@
+# PeerBanHelper 精简镜像（alpine + jlink 精简 JRE）
+# 构建：./build.sh [版本] [ALPINE_VERSION]
+# 精简方案、适配方法与实测数据见 总结.md
+
+ARG ALPINE_VERSION=3.24
+ARG PBH_VERSION=
+ARG JDK_TAG=25-musl
+ARG JRE_MODULES=java.base,java.desktop,java.management,java.naming,java.net.http,java.scripting,java.sql,java.xml,jdk.attach,jdk.crypto.ec,jdk.httpserver,jdk.jfr,jdk.jsobject,jdk.management,jdk.net,jdk.security.auth,jdk.unsupported,jdk.zipfs
+
+FROM docker.io/bellsoft/liberica-runtime-container:jdk-all-${JDK_TAG} AS jre
+ARG JRE_MODULES
+# client/minimal 是 Liberica 自动生成的 CDS archive，约 15 MiB；删掉不影响启动速度
+RUN ${JAVA_HOME}/bin/jlink --add-modules "${JRE_MODULES}" --strip-debug --no-man-pages --no-header-files --compress=zip-2 --output /opt/jre && rm -rf /opt/jre/lib/client /opt/jre/lib/minimal /opt/jre/legal
+
+FROM ghostchu/peerbanhelper:${PBH_VERSION} AS app
+RUN apk add --no-cache zip && cd /app && unzip -o -q PeerBanHelper.jar spy.properties && sed -i 's/^driverlist=.*/driverlist=org.sqlite.JDBC/' spy.properties && zip -q PeerBanHelper.jar spy.properties && cd /app/libraries && SQLITE_JAR=$(ls sqlite-jdbc-*.jar | grep -v natives-android) && zip -q -d "$SQLITE_JAR" 'org/sqlite/native/Windows/*' 'org/sqlite/native/FreeBSD/*' 'org/sqlite/native/Mac/*' 'org/sqlite/native/Linux/*' 'org/sqlite/native/Linux-Musl/aarch64/*' 'org/sqlite/native/Linux-Musl/x86/*' && rm -f sqlite-jdbc-*-natives-android.jar h2-*.jar mysql-connector-j-*.jar postgresql-*.jar flyway-mysql-*.jar flyway-database-postgresql-*.jar netty-transport-native-epoll-*-linux-aarch_64.jar netty-transport-native-io_uring-*-linux-aarch_64.jar netty-transport-native-kqueue-*-osx-x86_64.jar netty-transport-native-kqueue-*-osx-aarch_64.jar
+
+FROM docker.io/library/alpine:${ALPINE_VERSION}
+ARG PBH_VERSION
+COPY --from=jre /opt/jre /opt/jre
+ENV JAVA_HOME=/opt/jre PATH="$JAVA_HOME/bin:$PATH"
+RUN apk add --no-cache tzdata
+COPY --from=app /app/libraries /app/libraries
+COPY --from=app /app/PeerBanHelper.jar /app/PeerBanHelper.jar
+LABEL org.opencontainers.image.title="peerbanhelper" org.opencontainers.image.version="${PBH_VERSION}" org.opencontainers.image.source="https://github.com/PBH-BTN/PeerBanHelper"
+# 构建自检：上游一旦改了依赖，这里会直接构建失败，而不是等到运行时才报错
+RUN set -eu; J=$(ls /app/libraries/sqlite-jdbc-*.jar | grep -v natives-android); test -x /opt/jre/bin/java; /opt/jre/bin/java -version 2>&1 | grep -qE 'version "[0-9]+'; test -f /app/PeerBanHelper.jar; test -d /app/libraries; test "$(unzip -l "$J" | grep -c libsqlitejdbc.so)" -eq 1; unzip -p /app/PeerBanHelper.jar spy.properties | grep -qx 'driverlist=org.sqlite.JDBC'
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+WORKDIR /app
+VOLUME /tmp
+EXPOSE 9898
+ENTRYPOINT ["/entrypoint.sh"]
