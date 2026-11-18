@@ -1,0 +1,25 @@
+# qBittorrent Enhanced Edition（alpine + 上游静态 musl 二进制）
+# 构建：./build.sh [VERSION] [ALPINE_VERSION]
+# 详见 总结.md §4.5
+
+ARG ALPINE_VERSION=3.24
+ARG QBT_VERSION=
+
+FROM docker.io/library/alpine:${ALPINE_VERSION} AS builder
+ARG QBT_VERSION
+WORKDIR /qbittorrent
+RUN set -eu; apk add --no-cache curl unzip; curl -fsSL -o qbt.zip "https://github.com/c0re100/qBittorrent-Enhanced-Edition/releases/download/release-${QBT_VERSION}/qbittorrent-enhanced-nox_x86_64-linux-musl_static.zip"; unzip -q qbt.zip
+
+FROM docker.io/library/alpine:${ALPINE_VERSION}
+ARG QBT_VERSION
+ENV WEBUIPORT=8080
+RUN apk add --no-cache ca-certificates-bundle tzdata
+COPY --from=builder /qbittorrent/qbittorrent-nox /usr/local/bin/qbittorrent-nox
+COPY defaults/qBittorrent.conf /usr/local/qbittorrent/defaults/qBittorrent.conf
+LABEL org.opencontainers.image.title="qbittorrentee" org.opencontainers.image.version="${QBT_VERSION}" org.opencontainers.image.source="https://github.com/c0re100/qBittorrent-Enhanced-Edition"
+# 构建自检：--version 能跑通；上游若改成动态链接，这里会因缺库当场失败
+RUN set -eu; test -x /usr/local/bin/qbittorrent-nox; test -f /usr/local/qbittorrent/defaults/qBittorrent.conf; qbittorrent-nox --version >/dev/null
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+EXPOSE 8080 6881 6881/udp
+ENTRYPOINT ["/entrypoint.sh"]

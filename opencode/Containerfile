@@ -1,0 +1,16 @@
+# opencode（上游镜像 + 投资分析工作流依赖）
+# 构建：./build.sh [VERSION]
+# 详见 总结.md §4.4
+
+ARG VERSION=latest
+
+FROM ghcr.io/anomalyco/opencode:${VERSION}
+
+ARG VERSION
+
+RUN apk add --no-cache curl git jq poppler-utils python3
+LABEL org.opencontainers.image.title="opencode" org.opencontainers.image.version="${VERSION}" org.opencontainers.image.source="https://github.com/sst/opencode"
+# 构建自检
+RUN command -v curl git jq pdftotext python3 opencode >/dev/null
+
+ENTRYPOINT ["opencode"]

@@ -1,0 +1,32 @@
+# RSSHub（debian:trixie-slim + 裁剪过的 node 26 运行时 + 上游应用，无浏览器）
+# 构建：./build.sh [UPSTREAM_TAG]
+# 详见 总结.md §4.2
+
+ARG UPSTREAM_TAG=latest
+ARG UPSTREAM_VERSION=
+
+FROM docker.io/diygod/rsshub:${UPSTREAM_TAG} AS app-source
+
+# node 本体只留运行时（npm/corepack/头文件/文档都不要），删完再整块拷进干净基础镜像；
+# 直接在最终阶段 rm 只是写 whiteout，母层仍在、体积不减（总结.md §1.1）
+FROM docker.io/library/node:26-trixie-slim AS node-base
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack /usr/local/include /usr/local/share /usr/local/CHANGELOG.md /usr/local/README.md
+
+FROM docker.io/library/debian:trixie-slim
+ARG UPSTREAM_VERSION
+ENV TZ=Asia/Shanghai NODE_ENV=production NODE_OPTIONS=--max-http-header-size=32768 DEBIAN_FRONTEND=noninteractive
+RUN set -eu; apt-get update; apt-get install -y --no-install-recommends ca-certificates libatomic1 dumb-init libjemalloc2; rm -rf /var/lib/apt/lists/* /var/cache/apt/*
+# node 只拷 /usr/local 这一棵树，系统侧依赖靠上面的 apt 行（ca-certificates/libatomic1 与 node 官方镜像一致）
+COPY --from=node-base /usr/local /usr/local
+# LD_PRELOAD 必须放在上面的安装之后，否则构建期每条命令都会 cannot be preloaded
+ENV LD_PRELOAD=libjemalloc.so.2
+RUN --mount=from=app-source,source=/app,target=/src mkdir -p /app && cp -a /src/dist /src/node_modules /src/public /src/package.json /app/ && rm -rf /app/node_modules/.cache /app/node_modules/.pnpm/@typescript+typescript6@* /app/node_modules/typescript /app/node_modules/.pnpm/@oxc-parser+binding-wasm32-wasip1@* /app/node_modules/@oxc-parser/binding-wasm32-wasip1
+LABEL org.opencontainers.image.title="rsshub" org.opencontainers.image.version="${UPSTREAM_VERSION}" org.opencontainers.image.source="https://github.com/DIYgod/RSSHub"
+# 构建自检：裁剪生效 + 真起服务并探活 / 与内置路由 /test/1（最长等 30 秒；失败打印启动日志）
+RUN set -eu; test -f /app/dist/index.mjs; test -d /app/node_modules; [ ! -e /usr/local/lib/node_modules/npm ]; node --version >/dev/null; cd /app; node dist/index.mjs >/tmp/start.log 2>&1 & P=$!; s=0; node -e 'const st=async u=>{try{const r=await fetch(u);return [r.status,await r.text()]}catch(e){return [0,""]}};const w=async()=>{let a=[0,""],b=[0,""];for(let i=0;i<30;i++){[a,b]=await Promise.all([st("http://127.0.0.1:1200/"),st("http://127.0.0.1:1200/test/1")]);if(a[0]===200&&b[0]===200&&/<(rss|feed)/.test(b[1]))return 0;await new Promise(r=>setTimeout(r,1000))}require("fs").writeSync(2,"探活失败: / -> "+a[0]+" | /test/1 -> "+b[0]+"\n");return 1};w().then(c=>process.exit(c))' || s=$?; kill -9 "$P" 2>/dev/null || true; [ "$s" = 0 ] || { cat /tmp/start.log; exit 1; }
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+WORKDIR /app
+EXPOSE 1200
+ENTRYPOINT ["dumb-init", "--", "/entrypoint.sh"]
+CMD ["node", "dist/index.mjs"]
